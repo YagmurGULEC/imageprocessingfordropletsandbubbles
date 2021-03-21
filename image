@@ -1,0 +1,351 @@
+#!/usr/bin/python
+
+
+import cv2 as cv
+import numpy as np
+import glob,re
+import math
+from numpy import *
+from scipy.spatial import ConvexHull
+from scipy.spatial import Delaunay
+from matplotlib import pyplot as plt
+from scipy      import optimize
+from shapely.geometry import Point
+from shapely.geometry.polygon import Polygon
+from shapely import geometry
+
+plt.style.use('seaborn-white')
+
+from matplotlib.mlab import griddata
+import matplotlib.tri as tri
+
+import circle_fit as cf
+INT_MAX = 10000
+def onSegment(p, q, r):
+     
+    if ((q[0] <= max(p[0], r[0])) &
+        (q[0] >= min(p[0], r[0])) &
+        (q[1] <= max(p[1], r[1])) &
+        (q[1] >= min(p[1], r[1]))):
+        return True
+         
+    return False
+def orientation(p, q, r):
+     
+    val = (((q[1] - p[1]) *
+            (r[0] - q[0])) -
+           ((q[0] - p[0]) *
+            (r[1] - q[1])))
+            
+    if val == 0:
+        return 0
+    if val > 0:
+        return 1 # Collinear
+    else:
+        return 2 # Clock or counterclock
+def alphanum_key(s):
+    return [tryint(c) for c in re.split('([0-9]+)', s)]
+
+def sort_nicely(l):
+    return sorted(l, key=alphanum_key)  
+def filter(img,Min,Max):
+    ret1,th1 = cv.threshold(img,Min,Max,cv.THRESH_BINARY)  
+    alpha = cv.GaussianBlur(th1, (5,5),0)
+    edges = cv.Canny(th1,0,255)
+    return (th1,edges)
+def tryint(s):
+    try:
+        return int(s)
+    except ValueError:
+        return s
+def checkifbinarized(array):
+    
+    if ((np.all(array)==0) or (np.all(array)==1)):
+			return True
+method_2 = "leastsq"
+
+def calc_R(xc, yc):
+    """ calculate the distance of each 2D points from the center (xc, yc) """
+    return np.sqrt((x-xc)**2 + (y-yc)**2)
+
+def f_2(c):
+    """ calculate the algebraic distance between the data points and the mean circle centered at c=(xc, yc) """
+    Ri = calc_R(*c)
+    return Ri - Ri.mean()
+def is_point_in_path(x, y, poly):
+    """Determine if the point is in the path.
+
+    Args:
+      x -- The x coordinates of point.
+      y -- The y coordinates of point.
+      poly -- a list of tuples [(x, y), (x, y), ...]
+
+    Returns:
+      True if the point is in the path.
+    """
+    num = len(poly)
+    i = 0
+    j = num - 1
+    c = False
+    for i in range(num):
+        if ((poly[i][1] > y) != (poly[j][1] > y)) and \
+                (x < poly[i][0] + (poly[j][0] - poly[i][0]) * (y - poly[i][1]) /
+                                  (poly[j][1] - poly[i][1])):
+            c = not c
+        j = i
+    return c
+def alpha_shape(points, alpha, only_outer=True):
+    """
+    Compute the alpha shape (concave hull) of a set of points.
+    :param points: np.array of shape (n,2) points.
+    :param alpha: alpha value.
+    :param only_outer: boolean value to specify if we keep only the outer border
+    or also inner edges.
+    :return: set of (i,j) pairs representing edges of the alpha-shape. (i,j) are
+    the indices in the points array.
+    """
+    assert points.shape[0] > 3, "Need at least four points"
+
+    def add_edge(edges, i, j):
+        """
+        Add an edge between the i-th and j-th points,
+        if not in the list already
+        """
+        if (i, j) in edges or (j, i) in edges:
+            # already added
+            assert (j, i) in edges, "Can't go twice over same directed edge right?"
+            if only_outer:
+                # if both neighboring triangles are in shape, it's not a boundary edge
+                edges.remove((j, i))
+            return
+        edges.add((i, j))
+
+    tri = Delaunay(points)
+    edges = set()
+    # Loop over triangles:
+    # ia, ib, ic = indices of corner points of the triangle
+    for ia, ib, ic in tri.vertices:
+        pa = points[ia]
+        pb = points[ib]
+        pc = points[ic]
+        # Computing radius of triangle circumcircle
+        # www.mathalino.com/reviewer/derivation-of-formulas/derivation-of-formula-for-radius-of-circumcircle
+        a = np.sqrt((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2)
+        b = np.sqrt((pb[0] - pc[0]) ** 2 + (pb[1] - pc[1]) ** 2)
+        c = np.sqrt((pc[0] - pa[0]) ** 2 + (pc[1] - pa[1]) ** 2)
+        s = (a + b + c) / 2.0
+        area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+        circum_r = a * b * c / (4.0 * area)
+	
+        if circum_r < alpha:
+            add_edge(edges, ia, ib)
+            add_edge(edges, ib, ic)
+            add_edge(edges, ic, ia)
+    return edges
+def doIntersect(p1, q1, p2, q2):
+     
+    # Find the four orientations needed for  
+    # general and special cases 
+    o1 = orientation(p1, q1, p2)
+    o2 = orientation(p1, q1, q2)
+    o3 = orientation(p2, q2, p1)
+    o4 = orientation(p2, q2, q1)
+ 
+    # General case
+    if (o1 != o2) and (o3 != o4):
+        return True
+     
+    # Special Cases 
+    # p1, q1 and p2 are colinear and 
+    # p2 lies on segment p1q1 
+    if (o1 == 0) and (onSegment(p1, p2, q1)):
+        return True
+ 
+    # p1, q1 and p2 are colinear and 
+    # q2 lies on segment p1q1 
+    if (o2 == 0) and (onSegment(p1, q2, q1)):
+        return True
+ 
+    # p2, q2 and p1 are colinear and 
+    # p1 lies on segment p2q2 
+    if (o3 == 0) and (onSegment(p2, p1, q2)):
+        return True
+ 
+    # p2, q2 and q1 are colinear and 
+    # q1 lies on segment p2q2 
+    if (o4 == 0) and (onSegment(p2, q1, q2)):
+        return True
+ 
+    return False
+def is_inside_polygon(points, p):
+     
+    n = len(points)
+     
+    # There must be at least 3 vertices
+    # in polygon
+    if n < 3:
+        return False
+         
+    # Create a point for line segment
+    # from p to infinite
+    extreme = (INT_MAX, p[1])
+    count = i = 0
+     
+    while True:
+        next = (i + 1) % n
+         
+        # Check if the line segment from 'p' to  
+        # 'extreme' intersects with the line  
+        # segment from 'polygon[i]' to 'polygon[next]' 
+        if (doIntersect(points[i],
+                        points[next], 
+                        p, extreme)):
+                             
+            # If the point 'p' is colinear with line  
+            # segment 'i-next', then check if it lies  
+            # on segment. If it lies, return true, otherwise false 
+            if orientation(points[i], p, 
+                           points[next]) == 0:
+                return onSegment(points[i], p, 
+                                 points[next])
+                                  
+            count += 1
+             
+        i = next
+         
+        if (i == 0):
+            break
+         
+    # Return true if count is odd, false otherwise 
+    return (count % 2 == 1)
+
+files=glob.glob('./Mirsandi/*.png')
+sorted_files=sort_nicely(files)
+
+spf=1.0/7400
+
+time=0
+#input the concerning pixel/mm ratio to convert the points in mm 
+pixel_mm=1.0/90
+if __name__ == '__main__':
+	for j in range(0,1):
+		
+ 		img_2 = cv.imread(sorted_files[j],cv.IMREAD_UNCHANGED)
+		img_1 = cv.cvtColor(img_2, cv.COLOR_BGR2GRAY)
+		time=time+spf
+		
+		x,y=img_1.shape
+		
+		
+		img=img_1[:,:]
+                filtered,edges=filter(img,90,255)
+                
+                #get the boundaries
+		index=np.array(np.where(edges/255==1))
+                
+                
+	        allPoints=np.column_stack((index[1,:],index[0,:]))
+                allPoints_sorted=allPoints[allPoints[:,0].argsort()] 
+                plt.figure(figsize=(5,10))
+                
+                
+		plt.subplot(2,1,1)
+                
+		plt.imshow(img_2)
+                plt.title('original')
+    		plt.subplot(2,1,2)
+                
+		plt.imshow(img_1,'gray')
+                #check if threshold is good for capturing the boundary 
+                light_spots = np.array((edges/255==1).nonzero()).T
+                plt.plot(light_spots[:, 1], light_spots[:, 0], 'ro',markersize=1)
+                
+                plt.title('gray scale')
+                
+               
+		
+		plt.tight_layout()
+                
+		plt.savefig('fig_image%d'%j+'.png')
+		plt.figure(figsize=(10,10))
+                
+		
+                
+                plt.figure(figsize=(10,10))
+				
+              
+                n=len(allPoints_sorted[:,0])
+                y=np.ones(n)*np.max(allPoints[:,1])
+                SS=np.square(allPoints[:,1]-np.var(y))
+		
+                RSS=np.square(allPoints[:,1]-y)
+                SS=(np.max(RSS)-RSS)/np.max(RSS)
+                #to get rid of linear points due to the surface on which the bubble is attached you may adjust
+                index_fit=np.where(SS<0.999)
+                
+                
+                data=allPoints[index_fit]
+ 		
+		
+                edges = alpha_shape(data, alpha=5, only_outer=True)
+                T = ConvexHull(data)
+                points=np.column_stack((data[T.vertices,0], data[T.vertices,1]))
+                #to get rid of the reflection inside the bubble 
+		polygon1=([80,50],[80,125],[125,125],[125,50])
+		points_inside=[]
+
+		for x in range(0,len(data)):
+			
+			p=(data[x,0],data[x,1])
+
+				
+ 			if not(is_inside_polygon(polygon1, p)):
+					
+				points_inside.append(p)
+
+		#points after cleaning from the surface and the reflection inside
+                points_inside_array=np.array(points_inside)
+                plt.figure(figsize=(5,5))
+                plt.subplot(1,1,1)
+                #convert coordinates from pixel to mm
+                
+                coord_x=(points_inside_array[:,0]-np.min(points_inside_array[:,0]))*pixel_mm
+                coord_y=-(points_inside_array[:,1]-np.max(points_inside_array[:,1]))*pixel_mm
+		plt.plot(coord_x,coord_y, 'bo')
+                plt.xlabel('x [mm]')
+		plt.ylabel('y [mm]')
+                coords=np.column_stack((coord_x, coord_y))
+		
+                x_c,y_c,r_fit,R=cf.least_squares_circle((coords))
+                angle=np.deg2rad(180)
+		theta = np.linspace(-angle, angle, 100)
+                x = r_fit*np.sin(theta)+x_c
+		y = r_fit*np.cos(theta)+y_c
+                plt.plot(x,y,'--')
+		plt.plot(x_c,y_c,'k+')
+                
+                
+                plt.savefig('bubble_coord_%d'%j+'.png')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
